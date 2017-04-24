@@ -1,18 +1,181 @@
-# kubeadm-systemd
+# kubeadm-nspawn
 
 ## Introduction
 
-__kubeadm-systemd__ is a tool for creating a multi-node Kubernetes cluster
+__kubeadm-nspawn__ is a tool for creating a multi-node Kubernetes cluster
 on a single machine, created mostly for developers __of__ Kubernetes.
 
 It aims to be as similar to the solutions recommendend for production
 clusters as possible.
 
+## Getting started
+
+### Build proper systemd-nspawn version
+
+Unfortunately, there is [one pending feature](https://github.com/systemd/systemd/pull/4395)
+of systemd-nspawn which is merged in master, but not released yet.
+You will need to build your own systemd-nspawn binary.
+
+We higly recommend using CoreOS' fork which backported that feature
+to the 231 version of systemd (which is the one that Fedora and
+the other popular distributions are using in its stable releases).
+
+In order to do that, please use the following commands:
+
+```
+git clone git@github.com:coreos/systemd.git
+cd systemd
+git checkout v231
+./autogen.sh
+./configure
+make
+```
+
+You **shoudn't** do `make install` after that! Using the custom
+systemd-nspawn binary with the other components of systemd being
+in another version is totally fine.
+
+You may try to use master branch from upstream systemd repository, but
+it's very risky!
+
+### Get needed Kubernetes repositories
+
+kubeadm-nspawn needs the following repos to exist in your GOPATH:
+
+* [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes)
+* [kubernetes/release](https://github.com/kubernetes/release)
+
+Also, bulding Kubernetes may rely on having your own fork and the
+separate remote called `upstream`. In this HOWTO, we assume that
+you have these repositories forked.
+
+You can clone then by the following commands:
+
+```
+mkdir -p $GOPATH/src/k8s.io
+cd $GOPATH/src/k8s.io
+git clone git@github.com:<your_username>/kubernetes.git
+git clone git@github.com:<your_username>/release.git
+cd kubernetes
+git remote add upstream git@github.com:kubernetes/kubernetes.git
+cd ../release
+git remote add upstream git@github.com:kubernetes/release.git
+```
+
+### Build Kubernetes
+
+kubeadm-nspawn needs the built Kubernetes binaries and hyperkube
+Docker image. You need to build them like that:
+
+```
+cd $GOPATH/src/k8s.io/kubernetes
+build/run.sh make
+cd cluster/images/hyperkube
+make VERSION=latest
+```
+
+### Build CNI with plugins
+
+Firstly, you need to get a repo of CNI:
+
+```
+mkdir -p $GOPATH/src/github.com/containernetworking
+cd $GOPATH/src/github.com/containernetworking
+git clone git@github.com:containernetworking/cni.git
+```
+
+Then you can build CNI by doing:
+
+```
+cd cni
+./build
+```
+
+And then configure CNI networks needed by kubeadm-nspawn:
+
+```
+mkdir -p /etc/cni/net.d
+cat >/etc/cni/net.d/10-mynet.conf <<EOF
+{
+    "cniVersion": "0.2.0",
+    "name": "mynet",
+    "type": "bridge",
+    "bridge": "cni0",
+    "isGateway": true,
+    "ipMasq": true,
+    "ipam": {
+        "type": "host-local",
+        "subnet": "10.22.0.0/16",
+        "routes": [
+            { "dst": "0.0.0.0/0" }
+        ]
+    }
+}
+EOF
+cat >/etc/cni/net.d/99-loopback.conf <<EOF
+{
+    "cniVersion": "0.2.0",
+    "type": "loopback"
+}
+EOF
+```
+
+## Requirements
+
+### on the host
+
+  * systemd-nspawn with:
+    * `SYSTEMD_NSPAWN_USE_CGNS` https://github.com/systemd/systemd/pull/3809
+    * `SYSTEMD_NSPAWN_MOUNT_RW` and `SYSTEMD_NSPAWN_USE_NETNS` https://github.com/systemd/systemd/pull/4395
+
+### inside the nspawn container:
+
+  * Docker <= 1.10.3 (or host `systemd-nspawn` that has https://github.com/systemd/systemd/issues/5163 fixed)
+
+## Build and run kubeadm-nspawn
+
+Make sure you have `mkosi` available in you PATH.
+In the directory where you cloned this repository, please do:
+
+```
+make
+sudo GOPATH=$GOPATH SYSTEMD_NSPAWN_PATH=<path_to_your_nspawn_binary> ./kubeadm-nspawn up --nodes <number_of_nodes>
+sudo ./kubeadm-nspawn init
+sudo ./kubeadm-nspawn down
+```
+
+Alternatively to avoid using `mkosi`:
+```
+sudo GOPATH=$GOPATH SYSTEMD_NSPAWN_PATH=<path_to_your_nspawn_binary> IMAGE_URL=<url_to_rootfs_image> ./kubeadm-nspawn up --nodes <number_of_nodes> --image-method=download
+```
+
+Sometimes when Docker doesn't use the newest existing API, you may see
+the following error:
+
+```
+2017/01/26 16:41:38 Error when pushing image: Error response from daemon: client is newer than server (client API version: 1.26, server API version: 1.24)
+```
+
+Then you will need to include your Docker API version in DOCKER_API_VERSION
+environment variable:
+
+```
+sudo GOPATH=$GOPATH SYSTEMD_NSPAWN_PATH=<path_to_your_nspawn_binary> DOCKER_API_VERSION=1.24 ./kubeadm-nspawn up --nodes <number_of_nodes>
+```
+
+## What works - what doesn't work
+
+- [x] bringing up/down multiple nspawn containers
+- [x] bootstrapping nodes
+- [x] initialize node-0 as master with `kubeadm`
+- [x] join nodes to form a cluster
+- [ ] create deployments
+
 ## Architecture
 
 ![Architecture Diagram](architecture.png?raw=true "Architecture")
 
-kubeadm-systemd uses the following third-party components to
+kubeadm-nspawn uses the following third-party components to
 achieve its goal:
 
 ### CNI
